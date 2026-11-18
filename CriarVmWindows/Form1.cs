@@ -189,10 +189,13 @@ public sealed class Form1 : Form
 
         try
         {
-            var exit = await RunScriptAsync(script, vmName, user, password, edition, download ? "" : iso);
-            Append(exit == 0
-                ? "Concluído. A VM está a arrancar e entra sozinha com a conta indicada."
-                : "A criação falhou.");
+            var result = await RunScriptAsync(script, vmName, user, password, edition, download ? "" : iso);
+            if (result.MemoryMessage is not null)
+                Report(result.MemoryMessage);
+            else if (result.ExitCode == 0)
+                Append("Concluído. A VM está a arrancar e entra sozinha com a conta indicada.");
+            else
+                Append("A criação falhou.");
         }
         catch (Exception ex)
         {
@@ -218,7 +221,7 @@ public sealed class Form1 : Form
         return null;
     }
 
-    private static async Task<int> RunScriptAsync(string script, string vmName, string user, string password, string edition, string iso)
+    private static async Task<(int ExitCode, string? MemoryMessage)> RunScriptAsync(string script, string vmName, string user, string password, string edition, string iso)
     {
         var command = """
             $ErrorActionPreference = 'Stop'
@@ -235,7 +238,10 @@ public sealed class Form1 : Form
               & $env:VM_SCRIPT @splat *>&1 | ForEach-Object { $_.ToString() }
               exit 0
             } catch {
-              Write-Output $_.ToString()
+              $text = $_.Exception.Message
+              if ([string]::IsNullOrWhiteSpace($text)) { $text = $_.ToString() }
+              Write-Output $text
+              if ($text -like '*MEMORIA:*') { exit 2 }
               exit 1
             }
             """;
@@ -262,14 +268,35 @@ public sealed class Form1 : Form
         start.Environment["VM_IMAGE"] = edition;
         start.Environment["VM_ISO"] = iso;
 
+        var lines = new List<string>();
         using var process = new Process { StartInfo = start, EnableRaisingEvents = true };
-        process.OutputDataReceived += (_, e) => { if (e.Data is not null) AppendStatic(e.Data); };
-        process.ErrorDataReceived += (_, e) => { if (e.Data is not null) AppendStatic(e.Data); };
+        process.OutputDataReceived += (_, e) => Take(e.Data, lines);
+        process.ErrorDataReceived += (_, e) => Take(e.Data, lines);
         process.Start();
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
         await process.WaitForExitAsync();
-        return process.ExitCode;
+        process.WaitForExit();
+
+        string? memory = null;
+        lock (lines)
+        {
+            memory = lines
+                .Select(line => line.Contains("MEMORIA:", StringComparison.Ordinal)
+                    ? line[(line.IndexOf("MEMORIA:", StringComparison.Ordinal) + "MEMORIA:".Length)..].Trim()
+                    : null)
+                .FirstOrDefault(line => !string.IsNullOrWhiteSpace(line));
+        }
+        return (process.ExitCode, memory);
+    }
+
+    private static void Take(string? data, List<string> lines)
+    {
+        if (data is null)
+            return;
+        lock (lines)
+            lines.Add(data);
+        AppendStatic(data);
     }
 
     private void Report(string message)

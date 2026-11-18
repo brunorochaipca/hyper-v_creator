@@ -6,11 +6,12 @@ Aplicação para criar uma máquina virtual Hyper-V com o Windows 10 22H2 já in
 
 - Windows com o Hyper-V ativo
 - Permissão de administrador
+- Cerca de 5 GB de RAM livre. Se não houver, a aplicação pede para libertar memória e não inicia a VM
 - Espaço para o ISO e para um disco dinâmico de 100 GB
 
 ## Utilizar
 
-1. Descarrega o zip da [release v1.0.0](https://github.com/brunorochaipca/hyper-v_creator/releases/tag/v1.0.0).
+1. Descarrega o zip da [release v1.0.1](https://github.com/brunorochaipca/hyper-v_creator/releases/tag/v1.0.1).
 2. Extrai `CriarVmWindows.exe` e `win10vm.ps1` para a mesma pasta.
 3. Abre o executável. O Windows pede permissão de administrador.
 4. Escolhe descarregar o ISO oficial em português de Portugal ou indica um ISO que já tenhas.
