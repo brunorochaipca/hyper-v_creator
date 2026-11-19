@@ -53,10 +53,25 @@ param(
     [string]$ImageName = "Windows 10 Pro",
 
     # Se o ISO já estiver descarregado, passa o caminho e o Fido não corre.
-    [string]$IsoPath
+    [string]$IsoPath,
+
+    # SHA-256 esperado do ISO (opcional). Se for dado e não coincidir, a criação para antes de gastar tempo.
+    [ValidatePattern('^([0-9A-Fa-f]{64})?$')]
+    [string]$IsoSha256
 )
 
 $ErrorActionPreference = "Stop"
+
+# O Fido é descarregado de uma versão fixa e o ficheiro é verificado, em vez de usar o "master".
+# Para atualizar: escolhe uma versão em https://github.com/pbatard/Fido/releases e calcula o SHA-256 do Fido.ps1 dessa versão.
+$FidoVersion = "v1.72"
+$FidoCommit = "266084e3765ab8bf96767bd55c51b0ee70934551"
+$FidoSha256 = "89A26B4A8BE2721E610BA3F563EC44024E6CF7975938EE5B61D624D2BFBF4643"
+
+# Espaço mínimo estimado: o Windows 10 aplicado ocupa cerca de 15 GB e o disco dinâmico cresce com o uso.
+$WindowsNeedGb = 20
+$IsoNeedGb = 6
+$script:IsoWasDownloaded = $false
 
 function Test-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -82,9 +97,14 @@ function Get-MicrosoftIso([string]$Destination, [string]$FidoLanguage) {
     }
     if (Test-Path $Destination) { Remove-Item $Destination -Force }
 
-    $fido = Join-Path $env:TEMP "Fido.ps1"
-    Write-Host "A obter o Fido..."
-    Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/pbatard/Fido/master/Fido.ps1" -OutFile $fido
+    $fido = Join-Path $env:TEMP "Fido-$FidoVersion.ps1"
+    Write-Host "A obter o Fido $FidoVersion..."
+    Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/pbatard/Fido/$FidoCommit/Fido.ps1" -OutFile $fido
+    $fidoHash = (Get-FileHash -LiteralPath $fido -Algorithm SHA256).Hash
+    if ($fidoHash -ne $FidoSha256) {
+        Remove-Item -LiteralPath $fido -Force -ErrorAction SilentlyContinue
+        throw "INTEGRIDADE: O Fido descarregado não é o esperado (SHA-256 $fidoHash em vez de $FidoSha256). Por segurança não foi executado."
+    }
 
     Write-Host "A pedir o link do ISO à Microsoft (Windows 10 22H2, $FidoLanguage, x64)..."
     $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $fido -Win "10" -Rel "22H2" -Ed "Home/Pro" -Lang $FidoLanguage -Arch "x64" -GetUrl
@@ -98,8 +118,84 @@ function Get-MicrosoftIso([string]$Destination, [string]$FidoLanguage) {
 
     Write-Host "A descarregar o ISO para $Destination"
     Write-Host "O link da Microsoft expira ao fim de 24 horas. Se a descarga falhar, volta a correr o script."
+    $script:IsoWasDownloaded = $true
     Import-Module BitsTransfer
-    Start-BitsTransfer -Source $url -Destination $Destination
+    # A descarga corre em segundo plano para se poder comunicar o progresso (##DESCARGA:percentagem|MB feitos|MB totais).
+    $job = Start-BitsTransfer -Source $url -Destination $Destination -DisplayName "CriarVmWindows" -Asynchronous
+    try {
+        while ($true) {
+            $job = Get-BitsTransfer -JobId $job.JobId
+            $state = [string]$job.JobState
+            if ($state -eq "Transferred") { break }
+            if ($state -in "Error", "Cancelled") {
+                throw "A descarga do ISO falhou ($state). $($job.ErrorDescription)"
+            }
+            if ($state -eq "Suspended") { Resume-BitsTransfer -BitsJob $job -Asynchronous | Out-Null }
+            if ($job.BytesTotal -gt 0 -and $job.BytesTotal -lt [uint64]::MaxValue) {
+                $percent = [int](100 * $job.BytesTransferred / $job.BytesTotal)
+                $doneMb = [int]($job.BytesTransferred / 1MB)
+                $totalMb = [int]($job.BytesTotal / 1MB)
+                Write-Host "##DESCARGA:$percent|$doneMb|$totalMb"
+            }
+            Start-Sleep -Seconds 1
+        }
+        Complete-BitsTransfer -BitsJob $job
+    } catch {
+        Remove-BitsTransfer -BitsJob $job -ErrorAction SilentlyContinue
+        throw
+    }
+}
+
+function Get-DriveRoot([string]$AnyPath) {
+    return [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($AnyPath))
+}
+
+# Confirma que cada unidade envolvida tem espaço antes de descarregar ou copiar o que for.
+function Stop-IfDiskIsLow([string]$VmFolder, [string]$Iso, [bool]$NeedsDownload, [int]$DiskSizeGb) {
+    $needs = @{}
+    $reasons = @{}
+    $vmRoot = Get-DriveRoot $VmFolder
+    $needs[$vmRoot] = [int64]$WindowsNeedGb * 1GB
+    $reasons[$vmRoot] = @("o Windows instalado (cerca de $WindowsNeedGb GB)")
+    if ($NeedsDownload) {
+        $isoRoot = Get-DriveRoot $Iso
+        $needs[$isoRoot] = [int64]$needs[$isoRoot] + [int64]$IsoNeedGb * 1GB
+        $reasons[$isoRoot] = @($reasons[$isoRoot]) + "o ISO (cerca de $IsoNeedGb GB)"
+    }
+
+    foreach ($root in $needs.Keys) {
+        if ($root.StartsWith("\\")) {
+            Write-Host "Aviso: $root é uma pasta de rede, por isso não consigo verificar o espaço livre."
+            continue
+        }
+        $drive = Get-PSDrive -Name $root.Substring(0, 1) -PSProvider FileSystem -ErrorAction SilentlyContinue
+        if (-not $drive) { continue }
+        $free = [int64]$drive.Free
+        $needed = [int64]$needs[$root]
+        $freeGb = [math]::Round($free / 1GB, 1)
+        $neededGb = [math]::Round($needed / 1GB, 1)
+        if ($free -lt $needed) {
+            $why = @($reasons[$root]) -join " e "
+            throw "ESPACO: A unidade $root tem só $freeGb GB livres e são precisos pelo menos $neededGb GB para $why. Liberta espaço ou escolhe outra pasta em Opções avançadas."
+        }
+        Write-Host "Espaço na unidade ${root}: $freeGb GB livres (precisa de pelo menos $neededGb GB)."
+        if ($root -eq $vmRoot -and $free -lt ([int64]$DiskSizeGb * 1GB)) {
+            Write-Host "Aviso: o disco da VM pode crescer até $DiskSizeGb GB e a unidade tem menos do que isso livre."
+        }
+    }
+}
+
+# Calcula o SHA-256 quando há um valor esperado ou quando o ISO acabou de ser descarregado.
+function Confirm-IsoHash([string]$Iso, [string]$Expected, [bool]$Downloaded) {
+    if (-not $Expected -and -not $Downloaded) { return }
+    Write-Host "##DETALHE:A verificar o ISO..."
+    Write-Host "A calcular o SHA-256 do ISO (demora cerca de um minuto)..."
+    $actual = (Get-FileHash -LiteralPath $Iso -Algorithm SHA256).Hash
+    Write-Host "SHA-256 do ISO: $actual"
+    if ($Expected -and ($actual -ne $Expected.Trim().ToUpperInvariant())) {
+        throw "INTEGRIDADE: O SHA-256 do ISO ($actual) não coincide com o esperado ($($Expected.Trim().ToUpperInvariant())). O ISO pode estar corrompido ou não ser o que esperas."
+    }
+    if ($Expected) { Write-Host "O SHA-256 coincide com o esperado." }
 }
 
 function Get-RemoteLogonScript([string]$Account, [string]$Password) {
@@ -543,6 +639,9 @@ if (-not (Test-Administrator)) {
 
 Import-Module Hyper-V
 
+# Linhas "##..." são lidas pela aplicação para mostrar o progresso e saber o que limpar se for cancelado.
+Write-Host "##PASSO:1"
+
 if (-not $Path) {
     $Path = (Get-VMHost).VirtualHardDiskPath
 }
@@ -573,18 +672,28 @@ if (-not $IsoPath) {
 }
 if (Test-Path $disk) { throw "O disco já existe: $disk" }
 
-Get-MicrosoftIso -Destination $IsoPath -FidoLanguage $Language
+$needsDownload = -not ((Test-Path -LiteralPath $IsoPath) -and ((Get-Item -LiteralPath $IsoPath).Length -gt 4GB))
+Stop-IfDiskIsLow -VmFolder $Path -Iso $IsoPath -NeedsDownload $needsDownload -DiskSizeGb $DiskSize
 
+Write-Host "##ISO:$IsoPath"
+Get-MicrosoftIso -Destination $IsoPath -FidoLanguage $Language
+Confirm-IsoHash -Iso $IsoPath -Expected $IsoSha256 -Downloaded $script:IsoWasDownloaded
+
+Write-Host "##PASSO:2"
 Write-Host "A criar o disco de '$Client'..."
 New-VHD -Path $disk -Dynamic -SizeBytes ($DiskSize * 1GB) | Out-Null
+Write-Host "##DISCO:$disk"
 $xml = Get-UnattendXml -ComputerName $computerName -Account $UserName -AccountPassword $Password
 $setupScript = Get-RemoteLogonScript -Account $UserName -Password $Password
 try {
+    Write-Host "##PASSO:3"
     Install-WindowsOffline -DiskPath $disk -Iso $IsoPath -VmGeneration $Generation -EditionName $ImageName -UnattendXml $xml -SetupScript $setupScript
     Wait-VhdReleased $disk
 
+    Write-Host "##PASSO:4"
     Write-Host "A criar a VM '$Client'..."
     New-VM -Name $Client -MemoryStartupBytes ($StartMem * 1GB) -VHDPath $disk -SwitchName $VSwitch -Generation $Generation | Out-Null
+    Write-Host "##VM:$Client"
     Set-VMMemory -VMName $Client -DynamicMemoryEnabled $true -MinimumBytes ($StartMem * 1GB) -StartupBytes ($StartMem * 1GB) -MaximumBytes ($MaxMem * 1GB)
     Set-VMProcessor -VMName $Client -Count $Processors
     if ($Generation -eq 2) {
@@ -594,6 +703,7 @@ try {
         Set-VM -Name $Client -AutomaticCheckpointsEnabled $false
     }
 
+    Write-Host "##PASSO:5"
     Stop-IfMemoryIsLow -StartupGb $StartMem -AlreadyCreated $Client
 
     Start-VM -Name $Client

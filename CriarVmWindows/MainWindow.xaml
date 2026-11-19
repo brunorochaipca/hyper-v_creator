@@ -1,0 +1,263 @@
+<Window
+    x:Class="CriarVmWindows.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:CriarVmWindows">
+
+    <Grid x:Name="Root">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <Grid.Resources>
+            <DataTemplate x:Key="StepTemplate" x:DataType="local:StepItem">
+                <Grid MinHeight="32" ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="20" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <Grid Width="20" Height="20" VerticalAlignment="Center">
+                        <FontIcon Glyph="&#xE91F;" FontSize="16"
+                                  Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                  Visibility="{x:Bind IsPending, Mode=OneWay}" />
+                        <ProgressRing Width="18" Height="18" IsActive="{x:Bind IsRunning, Mode=OneWay}"
+                                      Visibility="{x:Bind IsRunning, Mode=OneWay}" />
+                        <FontIcon Glyph="&#xE73E;" FontSize="16"
+                                  Foreground="{ThemeResource SystemFillColorSuccessBrush}"
+                                  Visibility="{x:Bind IsDone, Mode=OneWay}" />
+                        <FontIcon Glyph="&#xEA39;" FontSize="16"
+                                  Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                                  Visibility="{x:Bind IsError, Mode=OneWay}" />
+                    </Grid>
+                    <TextBlock Grid.Column="1" Text="{x:Bind Title}" VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="2" Text="{x:Bind Detail, Mode=OneWay}" VerticalAlignment="Center"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </Grid>
+            </DataTemplate>
+        </Grid.Resources>
+
+        <!-- Barra de título integrada (Mica) -->
+        <Grid x:Name="AppTitleBar" Grid.Row="0" Height="40">
+            <StackPanel Orientation="Horizontal" Spacing="10" Margin="16,0,0,0" VerticalAlignment="Center">
+                <FontIcon Glyph="&#xE7F8;" FontSize="14" />
+                <TextBlock x:Name="TitleText" Text="Criar VM Windows 10"
+                           Style="{StaticResource CaptionTextBlockStyle}" VerticalAlignment="Center" />
+            </StackPanel>
+        </Grid>
+
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <StackPanel MaxWidth="820" Margin="24,0,24,24" Spacing="12">
+
+                <StackPanel x:Name="IntroPanel" Spacing="2" Margin="0,4,0,8">
+                    <TextBlock Text="Criar VM Windows 10" Style="{StaticResource TitleTextBlockStyle}" />
+                    <TextBlock Text="Cria uma máquina virtual Hyper-V com o Windows já instalado. Arranca no ambiente de trabalho, sem passar pelo instalador."
+                               Style="{StaticResource FieldHint}" />
+                </StackPanel>
+
+                <InfoBar x:Name="HyperVBar" IsOpen="False" IsClosable="False" Severity="Warning"
+                         Title="O Hyper-V não está disponível" />
+
+                <ContentControl x:Name="FormPanel" IsTabStop="False" HorizontalContentAlignment="Stretch">
+                <StackPanel Spacing="12">
+
+                    <!-- ISO -->
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel Spacing="12">
+                            <TextBlock Text="Imagem do Windows" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <RadioButtons x:Name="IsoSourceRadio" SelectedIndex="0"
+                                          SelectionChanged="IsoSourceRadio_SelectionChanged">
+                                <x:String>Descarregar o Windows 10 22H2 em português de Portugal</x:String>
+                                <x:String>Usar um ISO que já tenho</x:String>
+                            </RadioButtons>
+
+                            <StackPanel x:Name="IsoFilePanel" Spacing="4" Visibility="Collapsed">
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox x:Name="IsoPathBox" PlaceholderText="C:\ISO\Win10.iso"
+                                             TextChanged="IsoPathBox_TextChanged" LostFocus="IsoPathBox_LostFocus" />
+                                    <Button x:Name="BrowseIsoButton" Grid.Column="1" Content="Procurar…"
+                                            Click="BrowseIsoButton_Click" />
+                                </Grid>
+                                <TextBlock x:Name="IsoError" Style="{StaticResource FieldError}" />
+                            </StackPanel>
+
+                            <StackPanel Spacing="4">
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <ComboBox x:Name="EditionBox" Header="Edição dentro do ISO"
+                                              HorizontalAlignment="Stretch" SelectionChanged="Field_Changed" />
+                                    <ProgressRing x:Name="EditionRing" Grid.Column="1" Width="20" Height="20"
+                                                  VerticalAlignment="Bottom" Margin="0,0,4,8" IsActive="False" Visibility="Collapsed" />
+                                </Grid>
+                                <TextBlock x:Name="EditionError" Style="{StaticResource FieldError}" />
+                                <TextBlock x:Name="EditionHint" Style="{StaticResource FieldHint}" Visibility="Collapsed" />
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- VM -->
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel Spacing="4">
+                            <TextBlock Text="Máquina virtual" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,0,0,8" />
+                            <TextBox x:Name="NameBox" Header="Nome" Text="LABWIN10" TextChanged="NameBox_TextChanged" />
+                            <TextBlock x:Name="NameError" Style="{StaticResource FieldError}" />
+                            <TextBlock x:Name="NameHint" Style="{StaticResource FieldHint}" />
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Conta -->
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel Spacing="4">
+                            <TextBlock Text="Conta local" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,0,0,8" />
+                            <TextBox x:Name="UserBox" Header="Utilizador" Text="Lab" TextChanged="Field_TextChanged" />
+                            <TextBlock x:Name="UserError" Style="{StaticResource FieldError}" />
+                            <PasswordBox x:Name="PasswordBox" Header="Palavra-passe" Password="Lab12345"
+                                         PasswordRevealMode="Peek" PasswordChanged="PasswordBox_PasswordChanged" Margin="0,8,0,0" />
+                            <TextBlock x:Name="PasswordError" Style="{StaticResource FieldError}" />
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Avançadas -->
+                    <Expander x:Name="AdvancedExpander" Header="Opções avançadas"
+                              HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                        <Expander.Content>
+                            <StackPanel Spacing="12">
+                                <Grid ColumnSpacing="12" RowSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+
+                                    <NumberBox x:Name="StartMemBox" Header="Memória inicial (GB)" Value="4" Minimum="2" Maximum="64"
+                                               SpinButtonPlacementMode="Inline" SmallChange="1" HorizontalAlignment="Stretch"
+                                               ValueChanged="Field_ValueChanged" />
+                                    <NumberBox x:Name="MaxMemBox" Grid.Column="1" Header="Memória máxima (GB)" Value="8" Minimum="2" Maximum="64"
+                                               SpinButtonPlacementMode="Inline" SmallChange="1" HorizontalAlignment="Stretch"
+                                               ValueChanged="Field_ValueChanged" />
+
+                                    <NumberBox x:Name="CpuBox" Grid.Row="1" Header="Processadores" Value="4" Minimum="1" Maximum="64"
+                                               SpinButtonPlacementMode="Inline" SmallChange="1" HorizontalAlignment="Stretch"
+                                               ValueChanged="Field_ValueChanged" />
+                                    <NumberBox x:Name="DiskBox" Grid.Row="1" Grid.Column="1" Header="Disco dinâmico (GB)" Value="100" Minimum="40" Maximum="2000"
+                                               SpinButtonPlacementMode="Inline" SmallChange="10" HorizontalAlignment="Stretch"
+                                               ValueChanged="Field_ValueChanged" />
+
+                                    <ComboBox x:Name="SwitchBox" Grid.Row="2" Header="Comutador virtual" HorizontalAlignment="Stretch" SelectedIndex="0">
+                                        <ComboBoxItem Content="Automático (Default Switch)" />
+                                    </ComboBox>
+                                    <ComboBox x:Name="GenerationBox" Grid.Row="2" Grid.Column="1" Header="Geração" HorizontalAlignment="Stretch" SelectedIndex="0">
+                                        <ComboBoxItem Content="Geração 2 (UEFI, recomendado)" />
+                                        <ComboBoxItem Content="Geração 1 (BIOS)" />
+                                    </ComboBox>
+                                </Grid>
+                                <TextBlock x:Name="AdvancedError" Style="{StaticResource FieldError}" />
+
+                                <StackPanel Spacing="4">
+                                    <Grid ColumnSpacing="8">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBox x:Name="FolderBox" Header="Pasta dos discos virtuais"
+                                                 PlaceholderText="Predefinida do Hyper-V" />
+                                        <Button Grid.Column="1" Content="Procurar…" VerticalAlignment="Bottom" Click="BrowseFolderButton_Click" />
+                                        <Button Grid.Column="2" Content="Repor" VerticalAlignment="Bottom" Click="ResetFolderButton_Click" />
+                                    </Grid>
+                                </StackPanel>
+
+                                <StackPanel Spacing="4">
+                                    <TextBox x:Name="HashBox" Header="SHA-256 esperado do ISO (opcional)"
+                                             PlaceholderText="64 caracteres hexadecimais"
+                                             FontFamily="Cascadia Mono, Consolas" TextChanged="HashBox_TextChanged" />
+                                    <TextBlock x:Name="HashError" Style="{StaticResource FieldError}" />
+                                    <TextBlock Style="{StaticResource FieldHint}"
+                                               Text="Se indicares o valor, a criação pára antes de copiar o Windows caso o ISO não coincida. Sem valor, só se mostra o SHA-256 de um ISO acabado de descarregar." />
+                                </StackPanel>
+                            </StackPanel>
+                        </Expander.Content>
+                    </Expander>
+                </StackPanel>
+                </ContentControl>
+
+                <!-- Resumo do que está a ser criado (substitui o formulário durante a criação) -->
+                <Border x:Name="SummaryCard" Style="{StaticResource Card}" Visibility="Collapsed">
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <FontIcon Glyph="&#xE7F8;" FontSize="24" VerticalAlignment="Top"
+                                  Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                        <StackPanel Grid.Column="1" Spacing="2">
+                            <TextBlock x:Name="SummaryTitle" Style="{StaticResource BodyStrongTextBlockStyle}" TextTrimming="CharacterEllipsis" />
+                            <TextBlock x:Name="SummaryDetail" Style="{StaticResource FieldHint}" />
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
+                <!-- Progresso -->
+                <Border x:Name="ProgressCard" Style="{StaticResource Card}" Visibility="Collapsed">
+                    <StackPanel Spacing="12">
+                        <TextBlock Text="Progresso" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <ItemsControl x:Name="StepsList" ItemTemplate="{StaticResource StepTemplate}" />
+                        <ProgressBar x:Name="ProgressBar" IsIndeterminate="True" Minimum="0" Maximum="100" />
+                        <TextBlock x:Name="ProgressHint" Style="{StaticResource FieldHint}" />
+                        <InfoBar x:Name="ResultBar" IsOpen="False" IsClosable="False" />
+
+                        <Expander x:Name="LogExpander" Header="Detalhes" HorizontalAlignment="Stretch"
+                                  HorizontalContentAlignment="Stretch">
+                            <StackPanel Spacing="8">
+                                <ScrollViewer x:Name="LogScroller" Height="150" VerticalScrollBarVisibility="Auto"
+                                              HorizontalScrollBarVisibility="Auto">
+                                    <TextBlock x:Name="LogText" FontFamily="Cascadia Mono, Consolas" FontSize="12"
+                                               IsTextSelectionEnabled="True" />
+                                </ScrollViewer>
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <Button Click="CopyLogButton_Click">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <FontIcon Glyph="&#xE8C8;" FontSize="14" />
+                                            <TextBlock Text="Copiar registo" />
+                                        </StackPanel>
+                                    </Button>
+                                    <Button Click="SaveLogButton_Click">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <FontIcon Glyph="&#xE74E;" FontSize="14" />
+                                            <TextBlock Text="Guardar registo…" />
+                                        </StackPanel>
+                                    </Button>
+                                </StackPanel>
+                            </StackPanel>
+                        </Expander>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- Ações sempre visíveis -->
+        <Border Grid.Row="2" Padding="24,12"
+                Background="{ThemeResource LayerOnMicaBaseAltFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,1,0,0">
+            <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                <Button x:Name="OpenVmButton" Content="Abrir ligação à VM" Visibility="Collapsed" Click="OpenVmButton_Click" />
+                <Button x:Name="CancelButton" Content="Cancelar" Visibility="Collapsed" Click="CancelButton_Click" />
+                <Button x:Name="CreateButton" Content="Criar a VM" Style="{StaticResource AccentButtonStyle}"
+                        MinWidth="140" Click="CreateButton_Click" />
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>

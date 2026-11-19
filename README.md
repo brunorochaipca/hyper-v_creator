@@ -11,15 +11,17 @@ Aplicação para criar uma máquina virtual Hyper-V com o Windows 10 22H2 já in
 
 ## Utilizar
 
-1. Descarrega o zip da [release v1.0.1](https://github.com/brunorochaipca/hyper-v_creator/releases/tag/v1.0.1).
-2. Extrai `CriarVmWindows.exe` e `win10vm.ps1` para a mesma pasta.
-3. Abre o executável. O Windows pede permissão de administrador.
-4. Escolhe descarregar o ISO oficial em português de Portugal ou indica um ISO que já tenhas.
-5. Indica o nome da VM, a edição, o utilizador e a palavra-passe, e carrega em **Criar a VM**.
+1. Extrai a pasta publicada (ou o zip da release). `CriarVmWindows.exe` e `win10vm.ps1` têm de ficar na mesma pasta.
+2. Abre o executável. O Windows pede permissão de administrador.
+3. Escolhe descarregar o ISO oficial em português de Portugal ou indica um ISO que já tenhas. Com um ISO próprio, a lista de edições é lida do próprio ficheiro.
+4. Indica o nome da VM, o utilizador e a palavra-passe, e carrega em **Criar a VM**.
+5. Acompanha os cinco passos e a percentagem da descarga. Podes cancelar a qualquer momento: o que foi criado nessa execução (VM, disco, descarga) é removido.
 
-A cópia do Windows demora vários minutos. A primeira sessão mostra "A preparar o Windows" e entra sozinha. O Windows não fica ativado.
+Antes de descarregar ou copiar o que for, o script confirma que o Hyper-V responde, que há memória livre e que as unidades envolvidas têm espaço (cerca de 20 GB para o Windows e 6 GB para o ISO). Se indicares o **SHA-256 esperado do ISO** em Opções avançadas, a criação pára se o ISO não coincidir; um ISO acabado de descarregar mostra sempre o seu SHA-256 no registo. O Fido, que obtém o link oficial da Microsoft, é descarregado de uma versão fixa (v1.72) e só corre se o SHA-256 do ficheiro for o esperado; para atualizar a versão, altera as três variáveis `$Fido…` no início do `win10vm.ps1`.
 
-Por omissão a VM chama-se `LABWIN10`, usa a edição Windows 10 Pro, a conta `Lab` com a palavra-passe `Lab12345`, 4 GB de memória (até 8 GB), 4 processadores e o comutador **Default Switch**.
+A cópia do Windows demora vários minutos. A primeira sessão mostra "A preparar o Windows" e entra sozinha. O Windows não fica ativado. No fim, **Abrir ligação à VM** abre a consola da VM e, em **Detalhes**, podes copiar ou guardar o registo (a palavra-passe não aparece nele).
+
+Por omissão a VM chama-se `LABWIN10`, usa a edição Windows 10 Pro, a conta `Lab` com a palavra-passe `Lab12345`, 4 GB de memória (até 8 GB), 4 processadores, disco de 100 GB e o comutador **Default Switch**. Tudo isto se altera em **Opções avançadas** (memória, processadores, disco, comutador, geração e pasta dos discos).
 
 ## Pela consola
 
@@ -32,8 +34,8 @@ Numa consola de administrador, na pasta do script:
 
 ## Compilar
 
-É preciso o SDK .NET 8. O executável gerado tem de ficar na mesma pasta que `win10vm.ps1`.
+A interface é uma aplicação WinUI 3 (Windows App SDK) em .NET 10. É preciso o SDK .NET 10. A publicação gera uma pasta autónoma (o WinUI 3 não suporta ficheiro único) e já copia o `win10vm.ps1` para lá.
 
 ```powershell
-dotnet publish CriarVmWindows\CriarVmWindows.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+dotnet publish CriarVmWindows\CriarVmWindows.csproj -c Release -p:Platform=x64 -o publish
 ```
