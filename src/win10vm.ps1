@@ -19,9 +19,13 @@
   .\win10vm.ps1 -Client LABWIN10 -IsoPath D:\ISO\Win10.iso -VSwitch 'Default Switch'
 #>
 param(
-    [Parameter(Mandatory = $true, Position = 0)]
+    # Obrigatório, exceto com -ListEditions (ver a verificação mais abaixo).
+    [Parameter(Position = 0)]
     [ValidateNotNullOrEmpty()]
     [string]$Client,
+
+    # Só lista as edições do ISO indicado em -IsoPath (uma por linha, "EDICAO:nome") e termina.
+    [switch]$ListEditions,
 
     [string]$Path,
 
@@ -196,6 +200,17 @@ function Confirm-IsoHash([string]$Iso, [string]$Expected, [bool]$Downloaded) {
         throw "INTEGRIDADE: O SHA-256 do ISO ($actual) não coincide com o esperado ($($Expected.Trim().ToUpperInvariant())). O ISO pode estar corrompido ou não ser o que esperas."
     }
     if ($Expected) { Write-Host "O SHA-256 coincide com o esperado." }
+}
+
+# Lê as edições de um ISO montado. $Root pode ser "E:\" ou o caminho do volume (\\?\Volume{...}\).
+function Get-IsoEditionNames([string]$Root) {
+    $sources = $Root.TrimEnd("\") + "\sources"
+    $file = @("install.wim", "install.esd") |
+        ForEach-Object { "$sources\$_" } |
+        Where-Object { Test-Path -LiteralPath $_ } |
+        Select-Object -First 1
+    if (-not $file) { throw "O ISO não contém sources\install.wim nem sources\install.esd." }
+    return @(Get-WindowsImage -ImagePath $file | ForEach-Object { $_.ImageName })
 }
 
 function Get-RemoteLogonScript([string]$Account, [string]$Password) {
@@ -636,6 +651,38 @@ start "" powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -
 if (-not (Test-Administrator)) {
     throw "Corre este script numa consola de administrador. O Hyper-V não cria máquinas sem elevação."
 }
+
+if ($ListEditions) {
+    if (-not $IsoPath -or -not (Test-Path -LiteralPath $IsoPath)) { throw "Indica com -IsoPath um ISO que exista." }
+    $listLetter = $null
+    $names = @()
+    $lastError = $null
+    try {
+        # O Windows nem sempre atribui uma letra ao ISO montado. O caminho do volume (\\?\Volume{...})
+        # funciona sem letra; só se falhar é que se atribui uma letra livre, como na criação.
+        $listVolume = Mount-DiskImage -ImagePath $IsoPath -PassThru | Get-Volume | Select-Object -First 1
+        $roots = @()
+        if ($listVolume.DriveLetter -and $listVolume.DriveLetter -ne [char]0) { $roots += "$($listVolume.DriveLetter):\" }
+        if ($listVolume.Path) { $roots += [string]$listVolume.Path }
+        foreach ($root in $roots) {
+            try { $names = @(Get-IsoEditionNames $root) } catch { $lastError = $_.Exception.Message }
+            if ($names.Count -gt 0) { break }
+        }
+        if ($names.Count -eq 0) {
+            $listLetter = Mount-WindowsIso $IsoPath
+            $names = @(Get-IsoEditionNames "${listLetter}:\")
+        }
+        $names | ForEach-Object { Write-Output "EDICAO:$_" }
+    } catch {
+        if ($lastError -and $_.Exception.Message -like "*letra*") { throw $lastError }
+        throw
+    } finally {
+        Clear-WorkingMounts -IsoPath $IsoPath -Letters @($listLetter)
+    }
+    exit 0
+}
+
+if (-not $Client) { throw "Indica o nome da VM com -Client." }
 
 Import-Module Hyper-V
 

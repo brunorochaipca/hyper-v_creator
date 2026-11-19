@@ -25,7 +25,7 @@ Por omissão a VM chama-se `LABWIN10`, usa a edição Windows 10 Pro, a conta `L
 
 ## Pela consola
 
-Numa consola de administrador, na pasta do script:
+Numa consola de administrador, na pasta do script (`src`, ou a pasta publicada):
 
 ```powershell
 .\win10vm.ps1 -Client LABWIN10
@@ -34,8 +34,8 @@ Numa consola de administrador, na pasta do script:
 
 ## Compilar
 
-A interface é uma aplicação WinUI 3 (Windows App SDK) em .NET 10. É preciso o SDK .NET 10. A publicação gera uma pasta autónoma (o WinUI 3 não suporta ficheiro único) e já copia o `win10vm.ps1` para lá.
+A interface é uma aplicação WinUI 3 (Windows App SDK) em .NET 10. É preciso o SDK .NET 10. A publicação gera uma pasta autónoma (o WinUI 3 não suporta ficheiro único) e já copia o `win10vm.ps1` para lá. O código fica em `src`: a interface em `src\CriarVmWindows` e o script em `src\win10vm.ps1`.
 
 ```powershell
-dotnet publish CriarVmWindows\CriarVmWindows.csproj -c Release -p:Platform=x64 -o publish
+dotnet publish src\CriarVmWindows\CriarVmWindows.csproj -c Release -p:Platform=x64 -o publish
 ```

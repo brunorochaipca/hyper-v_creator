@@ -94,21 +94,13 @@ public sealed class VmRunner
     private const string EditionsCommand = """
         $ErrorActionPreference = 'Stop'
         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-        $mounted = $false
         try {
-          $image = Mount-DiskImage -ImagePath $env:VM_ISO -PassThru
-          $mounted = $true
-          $letter = ($image | Get-Volume).DriveLetter
-          if (-not $letter) { throw 'O ISO foi montado sem letra de unidade.' }
-          $file = @('install.wim', 'install.esd') | ForEach-Object { "${letter}:\sources\$_" } | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if (-not $file) { throw 'O ISO não contém sources\install.wim nem sources\install.esd.' }
-          Get-WindowsImage -ImagePath $file | ForEach-Object { 'EDICAO:' + $_.ImageName }
+          # O script monta o ISO como na criação (atribui uma letra livre se o Windows não a atribuir).
+          & $env:VM_SCRIPT -ListEditions -IsoPath $env:VM_ISO *>&1 | ForEach-Object { $_.ToString() }
           exit 0
         } catch {
           Write-Output ('ERRO:' + $_.Exception.Message)
           exit 1
-        } finally {
-          if ($mounted) { Dismount-DiskImage -ImagePath $env:VM_ISO | Out-Null }
         }
         """;
 
@@ -238,7 +230,13 @@ public sealed class VmRunner
         var output = new List<string>();
         try
         {
-            using var process = CreateProcess(EditionsCommand, new Dictionary<string, string> { ["VM_ISO"] = isoPath });
+            var script = FindScript()
+                ?? throw new FileNotFoundException("Não encontrei win10vm.ps1 ao lado da aplicação nem nas pastas acima.");
+            using var process = CreateProcess(EditionsCommand, new Dictionary<string, string>
+            {
+                ["VM_SCRIPT"] = script,
+                ["VM_ISO"] = isoPath
+            });
             var exit = await RunToEndAsync(process, output.Add);
             var editions = output.Where(l => l.StartsWith("EDICAO:", StringComparison.Ordinal)).Select(l => l[7..].Trim()).ToList();
             if (exit == 0 && editions.Count > 0)
