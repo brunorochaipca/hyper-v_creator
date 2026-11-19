@@ -9,6 +9,18 @@ Aplicação para criar uma máquina virtual Hyper-V com o Windows 10 22H2 já in
 - Cerca de 5 GB de RAM livre. Se não houver, a aplicação pede para libertar memória e não inicia a VM
 - Espaço para o ISO e para um disco dinâmico de 100 GB
 
+## Instalar
+
+Na pasta do repositório, ou depois de descarregar só o `instalar.ps1`:
+
+```powershell
+.\instalar.ps1
+```
+
+O script descarrega o `.zip` da última release, gera um MSIX assinado com um certificado desta máquina e abre-o. Se o `packaging\empacotar.ps1` e o manifesto não estiverem ao lado, vai buscá-los ao repositório. O `.msix` e o `.cer` ficam em `packaging\` e o Git ignora-os. Se faltarem o [Trust My Msix](https://github.com/Chill-Astro/Trust-My-Msix), o Windows SDK ou o App Installer, abre uma janela do PowerShell que os instala com o winget.
+
+O Trust My Msix pede administrador e mete o certificado nas autoridades de raiz fidedignas. A aplicação continua a pedir administrador, porque cria a VM no Hyper-V. A chave privada fica em `packaging\certs` e não entra no Git.
+
 ## Utilizar
 
 1. Extrai a pasta publicada (ou o zip da release). `CriarVmWindows.exe` e `win10vm.ps1` têm de ficar na mesma pasta.

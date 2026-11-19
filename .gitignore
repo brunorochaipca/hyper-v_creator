@@ -4,4 +4,9 @@ obj/
 *.user
 CriarVmWindows.exe
 publish/
+packaging/certs/
+packaging/msix-layout/
+packaging/release/
+packaging/*.msix
+packaging/*.cer
 *.lnk
