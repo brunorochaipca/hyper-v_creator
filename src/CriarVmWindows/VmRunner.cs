@@ -21,7 +21,8 @@ public sealed record RunNotice(string Kind, string Message);
 /// <summary>Texto curto a mostrar ao lado do passo atual (por exemplo "A verificar o ISO...").</summary>
 public sealed record DetailEvent(string Text) : RunnerEvent;
 
-public sealed record RunResult(int ExitCode, RunNotice? Notice, bool Cancelled);
+/// <param name="CreatedVm">Nome da VM que esta execução chegou a criar (vazio se não chegou).</param>
+public sealed record RunResult(int ExitCode, RunNotice? Notice, bool Cancelled, string? CreatedVm = null);
 
 public sealed record HyperVStatus(bool Available, IReadOnlyList<string> Switches, string? Error);
 
@@ -61,6 +62,44 @@ public sealed class VmRunner
           if ($text -like '*INTEGRIDADE:*') { exit 4 }
           exit 1
         }
+        """;
+
+    private const string StartCommand = """
+        $ErrorActionPreference = 'Stop'
+        [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+        $OutputEncoding = [Console]::OutputEncoding
+        try {
+          & $env:VM_SCRIPT -StartExisting -Client $env:VM_CLIENT *>&1 | ForEach-Object { $_.ToString() }
+          exit 0
+        } catch {
+          $text = $_.Exception.Message
+          if ([string]::IsNullOrWhiteSpace($text)) { $text = $_.ToString() }
+          Write-Output $text
+          if ($text -like '*MEMORIA:*') { exit 2 }
+          exit 1
+        }
+        """;
+
+    private const string FixSessionCommand = """
+        $ErrorActionPreference = 'Stop'
+        [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+        $OutputEncoding = [Console]::OutputEncoding
+        try {
+          & $env:VM_SCRIPT -FixSession -Client $env:VM_CLIENT -UserName $env:VM_USER -Password $env:VM_PASSWORD *>&1 | ForEach-Object { $_.ToString() }
+          exit 0
+        } catch {
+          $text = $_.Exception.Message
+          if ([string]::IsNullOrWhiteSpace($text)) { $text = $_.ToString() }
+          Write-Output $text
+          if ($text -like '*MEMORIA:*') { exit 2 }
+          exit 1
+        }
+        """;
+
+    private const string VmNamesCommand = """
+        $ErrorActionPreference = 'SilentlyContinue'
+        [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+        Get-VM | ForEach-Object { 'VM:' + $_.Name }
         """;
 
     // Depois de cancelar remove só o que esta execução criou: VM, disco, descarga em curso e montagens.
@@ -185,7 +224,77 @@ public sealed class VmRunner
             return new RunResult(exitCode, null, true);
         }
 
-        RunNotice? notice = null;
+        return new RunResult(exitCode, FindNotice(lines), false, vmSeen);
+    }
+
+    /// <summary>
+    /// Arranca uma VM que já existe (por exemplo, depois de faltar memória) em vez de a criar outra vez.
+    /// Cancelar só interrompe o arranque: a VM não é apagada.
+    /// </summary>
+    public async Task<RunResult> StartExistingAsync(string vmName, IProgress<RunnerEvent> progress, CancellationToken cancel)
+    {
+        var script = FindScript()
+            ?? throw new FileNotFoundException("Não encontrei win10vm.ps1 ao lado da aplicação nem nas pastas acima.");
+
+        var lines = new List<string>();
+
+        void OnLine(string line)
+        {
+            lock (lines)
+                lines.Add(line);
+            if (line.StartsWith("##PASSO:", StringComparison.Ordinal)
+                && int.TryParse(line[8..], CultureInfo.InvariantCulture, out var step))
+                progress.Report(new StepEvent(step));
+            else if (!line.StartsWith("##", StringComparison.Ordinal))
+                progress.Report(new LogEvent(line));
+        }
+
+        using var process = CreateProcess(StartCommand, new Dictionary<string, string>
+        {
+            ["VM_SCRIPT"] = script,
+            ["VM_CLIENT"] = vmName
+        });
+        using var registration = cancel.Register(() => KillTree(process));
+        var exitCode = await RunToEndAsync(process, OnLine);
+
+        if (cancel.IsCancellationRequested)
+            return new RunResult(exitCode, null, true, vmName);
+        return new RunResult(exitCode, FindNotice(lines), false, vmName);
+    }
+
+    /// <summary>
+    /// Repara a sessão avançada de uma VM que já existe: desliga-a, mete a conta nos Administradores e
+    /// no Ambiente de Trabalho Remoto, volta a ligá-la e confirma dentro dela. Não se cancela a meio,
+    /// porque o disco da VM está aberto neste Windows enquanto a correção é escrita.
+    /// </summary>
+    public async Task<RunResult> FixSessionAsync(string vmName, string userName, string password, IProgress<RunnerEvent> progress)
+    {
+        var script = FindScript()
+            ?? throw new FileNotFoundException("Não encontrei win10vm.ps1 ao lado da aplicação nem nas pastas acima.");
+
+        var lines = new List<string>();
+
+        void OnLine(string line)
+        {
+            lock (lines)
+                lines.Add(line);
+            if (!line.StartsWith("##", StringComparison.Ordinal))
+                progress.Report(new LogEvent(line));
+        }
+
+        using var process = CreateProcess(FixSessionCommand, new Dictionary<string, string>
+        {
+            ["VM_SCRIPT"] = script,
+            ["VM_CLIENT"] = vmName,
+            ["VM_USER"] = userName,
+            ["VM_PASSWORD"] = password
+        });
+        var exitCode = await RunToEndAsync(process, OnLine);
+        return new RunResult(exitCode, FindNotice(lines), false, vmName);
+    }
+
+    private static RunNotice? FindNotice(List<string> lines)
+    {
         lock (lines)
         {
             foreach (var kind in new[] { "MEMORIA", "ESPACO", "INTEGRIDADE" })
@@ -197,13 +306,26 @@ public sealed class VmRunner
                         : null)
                     .FirstOrDefault(text => !string.IsNullOrWhiteSpace(text));
                 if (message is not null)
-                {
-                    notice = new RunNotice(kind, message);
-                    break;
-                }
+                    return new RunNotice(kind, message);
             }
         }
-        return new RunResult(exitCode, notice, false);
+        return null;
+    }
+
+    /// <summary>Nomes das VMs que já existem no Hyper-V (vazio se não for possível ler).</summary>
+    public static async Task<IReadOnlyList<string>> ListVmNamesAsync()
+    {
+        var output = new List<string>();
+        try
+        {
+            using var process = CreateProcess(VmNamesCommand, new Dictionary<string, string>());
+            await RunToEndAsync(process, output.Add);
+        }
+        catch
+        {
+            return [];
+        }
+        return output.Where(l => l.StartsWith("VM:", StringComparison.Ordinal)).Select(l => l[3..].Trim()).ToList();
     }
 
     /// <summary>Verifica se o Hyper-V responde e devolve os comutadores virtuais.</summary>

@@ -27,6 +27,14 @@ param(
     # Só lista as edições do ISO indicado em -IsoPath (uma por linha, "EDICAO:nome") e termina.
     [switch]$ListEditions,
 
+    # Só arranca a VM -Client que já existe (por exemplo, depois de faltar memória) e abre a ligação.
+    [switch]$StartExisting,
+
+    # Repara a sessão avançada da VM -Client que já existe: desliga-a, mete a conta -UserName nos
+    # Administradores e no Ambiente de Trabalho Remoto através de um script de arranque, e volta a ligá-la.
+    # Se -Password for dado, confirma o resultado dentro da VM.
+    [switch]$FixSession,
+
     [string]$Path,
 
     [ValidateRange(40, 2000)]
@@ -87,10 +95,20 @@ function ConvertTo-XmlText([string]$Value) {
     return $Value.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;").Replace('"', "&quot;")
 }
 
-function Get-SafeComputerName([string]$Name) {
+function Get-SafeComputerName([string]$Name, [string]$Account) {
     $clean = ($Name -replace "[^A-Za-z0-9-]", "")
     if (-not $clean) { $clean = "WIN10VM" }
     if ($clean.Length -gt 15) { $clean = $clean.Substring(0, 15) }
+
+    # Se a conta tiver o nome do computador, o Windows resolve o nome como a conta do próprio
+    # computador e recusa pô-la nos Administradores («failed to add ... 0x8007056b»). Sem
+    # administrador, a sessão avançada diz que falta o direito de iniciar sessão remota.
+    if ($Account -and [string]::Equals($clean, ($Account -replace "[^A-Za-z0-9-]", ""), [StringComparison]::OrdinalIgnoreCase)) {
+        $suffix = "-PC"
+        if ($clean.Length + $suffix.Length -gt 15) { $clean = $clean.Substring(0, 15 - $suffix.Length) }
+        $clean += $suffix
+        Write-Host "O nome do computador será '$clean', porque a conta '$Account' não pode ter o mesmo nome que ele."
+    }
     return $clean
 }
 
@@ -213,68 +231,10 @@ function Get-IsoEditionNames([string]$Root) {
     return @(Get-WindowsImage -ImagePath $file | ForEach-Object { $_.ImageName })
 }
 
-function Get-RemoteLogonScript([string]$Account, [string]$Password) {
-    $safeAccount = $Account.Replace("'", "''")
-    $safePassword = $Password.Replace("'", "''")
-    return @"
-`$ErrorActionPreference = 'Continue'
-`$name = '$safeAccount'
-`$password = '$safePassword'
-`$deadline = (Get-Date).AddMinutes(3)
-do {
-  if (-not (Get-LocalUser -Name `$name -ErrorAction SilentlyContinue)) {
-    `$secret = ConvertTo-SecureString `$password -AsPlainText -Force
-    New-LocalUser -Name `$name -Password `$secret -PasswordNeverExpires -ErrorAction SilentlyContinue | Out-Null
-  }
-  `$user = Get-LocalUser -Name `$name -ErrorAction SilentlyContinue
-  if (`$user) {
-    Add-LocalGroupMember -SID 'S-1-5-32-544' -Member `$user -ErrorAction SilentlyContinue
-    Add-LocalGroupMember -SID 'S-1-5-32-555' -Member `$user -ErrorAction SilentlyContinue
-    try {
-      `$computer = [ADSI]'WinNT://.'
-      `$account = `$null
-      foreach (`$child in `$computer.Children) {
-        if (`$child.SchemaClassName -eq 'User' -and `$child.Name -eq `$name) { `$account = `$child; break }
-      }
-      if (`$account) {
-        foreach (`$sid in 'S-1-5-32-544','S-1-5-32-555') {
-          `$groupName = (Get-LocalGroup -SID `$sid).Name
-          `$group = [ADSI]('WinNT://./' + `$groupName + ',group')
-          `$group.Add(`$account.Path)
-        }
-      }
-    } catch { }
-    `$export = Join-Path `$env:TEMP 'rdp-rights-export.inf'
-    secedit /export /cfg `$export /areas USER_RIGHTS | Out-Null
-    `$found = Select-String -Path `$export -Pattern '^SeRemoteInteractiveLogonRight\s*=' | Select-Object -First 1
-    `$line = if (`$found) { `$found.Line.Trim() } else { 'SeRemoteInteractiveLogonRight =' }
-    `$sid = '*' + `$user.Sid.Value
-    if (`$line -notlike "*`$sid*") {
-      if (`$line.EndsWith('=')) { `$line += " `$sid" } else { `$line += ",`$sid" }
-    }
-    `$inf = Join-Path `$env:TEMP 'rdp-rights.inf'
-    @(
-      '[Unicode]'
-      'Unicode=yes'
-      '[Version]'
-      'signature="`$CHICAGO`$"
-      'Revision=1'
-      '[Privilege Rights]'
-      `$line
-    ) | Set-Content -Path `$inf -Encoding Unicode
-    secedit /configure /db (Join-Path `$env:TEMP 'rdp-rights.sdb') /cfg `$inf /areas USER_RIGHTS | Out-Null
-  }
-  Start-Sleep -Seconds 2
-} while ((Get-Date) -lt `$deadline)
-New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -PropertyType DWord -Value 0 -Force | Out-Null
-"@
-}
-
 function Get-UnattendXml([string]$ComputerName, [string]$Account, [string]$AccountPassword) {
     $computer = ConvertTo-XmlText $ComputerName
     $account = ConvertTo-XmlText $Account
     $secret = ConvertTo-XmlText $AccountPassword
-    $remoteLogon = "C:\Windows\Setup\Scripts\Grant-HyperVSession.cmd"
 
     return @"
 <?xml version="1.0" encoding="utf-8"?>
@@ -313,15 +273,6 @@ function Get-UnattendXml([string]$ComputerName, [string]$Account, [string]$Accou
         <Password><Value>$secret</Value><PlainText>true</PlainText></Password>
         <LogonCount>1</LogonCount>
       </AutoLogon>
-    </component>
-    <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
-      <RunSynchronous>
-        <RunSynchronousCommand wcm:action="add">
-          <Order>1</Order>
-          <Path>$remoteLogon</Path>
-          <WillReboot>Never</WillReboot>
-        </RunSynchronousCommand>
-      </RunSynchronous>
     </component>
   </settings>
 </unattend>
@@ -417,7 +368,7 @@ function Stop-IfMemoryIsLow([int]$StartupGb, [string]$AlreadyCreated) {
     $freeGb = [math]::Round((Get-FreeMemoryBytes) / 1GB, 1)
     $hyperGb = [math]::Round($available / 1GB, 1)
     if ($AlreadyCreated) {
-        throw "MEMORIA: A VM '$AlreadyCreated' ficou criada, mas não a iniciei. Não há memória RAM livre suficiente: a VM precisa de $StartupGb GB, o Windows tem cerca de $freeGb GB livres e o Hyper-V pode atribuir cerca de $hyperGb GB. Liberta memória RAM, fecha outros programas, e inicia a VM no Gestor do Hyper-V."
+        throw "MEMORIA: A VM '$AlreadyCreated' ficou criada, mas não a iniciei. Não há memória RAM livre suficiente: a VM precisa de $StartupGb GB, o Windows tem cerca de $freeGb GB livres e o Hyper-V pode atribuir cerca de $hyperGb GB. Liberta memória RAM, fecha outros programas e tenta iniciar a VM outra vez (botão «Tentar iniciar a VM», ou -StartExisting -Client $AlreadyCreated, ou o Gestor do Hyper-V)."
     }
     throw "MEMORIA: Não há memória RAM livre suficiente para iniciar a VM. Ela precisa de $StartupGb GB, o Windows tem cerca de $freeGb GB livres e o Hyper-V pode atribuir cerca de $hyperGb GB. Liberta memória RAM, fecha outros programas, e tenta outra vez."
 }
@@ -558,7 +509,7 @@ function Clear-WorkingMounts([string]$DiskPath, [string]$IsoPath, [string[]]$Let
 }
 
 # Writes Windows onto the VHD from this machine, so the VM never boots the installer.
-function Install-WindowsOffline([string]$DiskPath, [string]$Iso, [int]$VmGeneration, [string]$EditionName, [string]$UnattendXml, [string]$SetupScript) {
+function Install-WindowsOffline([string]$DiskPath, [string]$Iso, [int]$VmGeneration, [string]$EditionName, [string]$UnattendXml) {
     $isoMounted = $false
     $vhdMounted = $false
     $letters = @()
@@ -629,16 +580,6 @@ exit
         New-Item -ItemType Directory -Path $panther -Force | Out-Null
         $utf8 = [Text.UTF8Encoding]::new($false)
         [IO.File]::WriteAllText((Join-Path $panther "unattend.xml"), $UnattendXml, $utf8)
-        if ($SetupScript) {
-            $scripts = "${windowsLetter}:\Windows\Setup\Scripts"
-            New-Item -ItemType Directory -Path $scripts -Force | Out-Null
-            [IO.File]::WriteAllText((Join-Path $scripts "Grant-HyperVSession.ps1"), $SetupScript, [Text.UTF8Encoding]::new($true))
-            $launcher = @"
-@echo off
-start "" powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\Windows\Setup\Scripts\Grant-HyperVSession.ps1
-"@
-            [IO.File]::WriteAllText((Join-Path $scripts "Grant-HyperVSession.cmd"), $launcher, [Text.Encoding]::ASCII)
-        }
     } finally {
         $vhd = $null
         [GC]::Collect()
@@ -686,6 +627,207 @@ if (-not $Client) { throw "Indica o nome da VM com -Client." }
 
 Import-Module Hyper-V
 
+# Corre dentro do Windows da VM, como sistema, no arranque. A conta entra nos grupos pelo objeto
+# (não pelo nome), que é o que funciona mesmo quando o nome da conta coincide com o do computador.
+function Get-SessionRepairScript([string]$Account) {
+    $safeAccount = $Account.Replace("'", "''")
+    return @"
+`$ErrorActionPreference = 'Continue'
+`$name = '$safeAccount'
+`$report = 'C:\Windows\Setup\Scripts\corrigir-sessao.txt'
+`$groups = 'S-1-5-32-544', 'S-1-5-32-555'
+`$ok = `$false
+`$notes = @()
+for (`$try = 1; `$try -le 30 -and -not `$ok; `$try++) {
+  `$user = Get-LocalUser -Name `$name -ErrorAction SilentlyContinue
+  if (`$user) {
+    `$missing = 0
+    foreach (`$sid in `$groups) {
+      `$members = @(Get-LocalGroupMember -SID `$sid -ErrorAction SilentlyContinue | ForEach-Object { `$_.SID.Value })
+      if (`$members -notcontains `$user.SID.Value) {
+        try { Add-LocalGroupMember -SID `$sid -Member `$user -ErrorAction Stop; `$notes += "`$sid adicionado" }
+        catch { `$notes += "`$sid erro: `$(`$_.Exception.Message)" }
+        `$members = @(Get-LocalGroupMember -SID `$sid -ErrorAction SilentlyContinue | ForEach-Object { `$_.SID.Value })
+        if (`$members -notcontains `$user.SID.Value) { `$missing++ }
+      }
+    }
+    `$ok = (`$missing -eq 0)
+  } else { `$notes += 'conta ainda não existe' }
+  if (-not `$ok) { Start-Sleep -Seconds 2 }
+}
+New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -PropertyType DWord -Value 0 -Force | Out-Null
+`$status = 'FALHOU'
+if (`$ok) { `$status = 'OK' }
+Set-Content -Path `$report -Value (`$status + ' ' + (`$notes -join ' | '))
+if (`$ok) {
+  reg.exe delete 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' /v RunStartupScriptSync /f | Out-Null
+  Remove-Item 'C:\Windows\System32\GroupPolicy\Machine\Scripts\scripts.ini' -Force -ErrorAction SilentlyContinue
+  Remove-Item 'C:\Windows\System32\GroupPolicy\gpt.ini' -Force -ErrorAction SilentlyContinue
+}
+"@
+}
+
+function Invoke-OfflineRegistry([string]$HiveFile, [scriptblock]$Action) {
+    $hive = "HKLM\CRIARVM_REPARAR"
+    $load = & reg.exe load $hive $HiveFile 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "Não consegui abrir o registo do Windows da VM. $load" }
+    try {
+        & $Action $hive
+    } finally {
+        [GC]::Collect()
+        $unload = & reg.exe unload $hive 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            Start-Sleep -Seconds 2
+            [GC]::Collect()
+            $unload = & reg.exe unload $hive 2>&1 | Out-String
+        }
+        if ($LASTEXITCODE -ne 0) { Write-Host "Aviso: o registo da VM ficou aberto ($unload)" }
+    }
+}
+
+function Repair-AdvancedSession([string]$VmName, [string]$Account, [string]$AccountPassword) {
+    $vm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+    if (-not $vm) { throw "A VM '$VmName' não existe no Hyper-V." }
+    if (-not $Account) { throw "Indica a conta da VM com -UserName." }
+
+    $drive = @(Get-VMHardDiskDrive -VMName $VmName) | Select-Object -First 1
+    if (-not $drive -or -not $drive.Path) { throw "A VM '$VmName' não tem disco." }
+    $diskPath = $drive.Path
+
+    Write-Host "A desligar a VM '$VmName'..."
+    if ([string]$vm.State -in @("Saved", "Paused")) {
+        throw "A VM '$VmName' está em estado '$($vm.State)'. Liga-a e desliga-a no Gestor do Hyper-V e tenta outra vez."
+    }
+    if ([string]$vm.State -ne "Off") {
+        Stop-VM -Name $VmName -Force -ErrorAction SilentlyContinue
+        for ($i = 0; $i -lt 60 -and [string](Get-VM -Name $VmName).State -ne "Off"; $i++) { Start-Sleep -Seconds 2 }
+        if ([string](Get-VM -Name $VmName).State -ne "Off") { Stop-VM -Name $VmName -TurnOff -Force }
+    }
+
+    $existingMount = Get-VHD -Path $diskPath
+    if ($existingMount.Attached) { Dismount-VHD -Path $diskPath }
+
+    $mounted = $false
+    $letter = $null
+    try {
+        Write-Host "A abrir o disco da VM..."
+        Mount-VHD -Path $diskPath -NoDriveLetter
+        $mounted = $true
+        $diskNumber = (Get-VHD -Path $diskPath).DiskNumber
+
+        foreach ($partition in @(Get-Partition -DiskNumber $diskNumber | Where-Object { $_.Type -eq "Basic" -and $_.Size -gt 5GB })) {
+            $candidate = Get-FreeDriveLetter
+            Set-Partition -DiskNumber $diskNumber -PartitionNumber $partition.PartitionNumber -NewDriveLetter $candidate
+            Start-Sleep -Seconds 1
+            if (Test-Path "${candidate}:\Windows\System32\config\SOFTWARE") { $letter = $candidate; break }
+            Remove-AssignedDriveLetter ([string]$candidate)
+        }
+        if (-not $letter) { throw "Não encontrei o Windows no disco da VM '$VmName'." }
+
+        $windows = "${letter}:\Windows"
+        $policy = Join-Path $windows "System32\GroupPolicy"
+        $startupIni = Join-Path $policy "Machine\Scripts\scripts.ini"
+        $policyIni = Join-Path $policy "gpt.ini"
+        if ((Test-Path -LiteralPath $startupIni) -or (Test-Path -LiteralPath $policyIni)) {
+            throw "A VM já tem scripts de arranque definidos por política. Não os altero; corrige a conta dentro da VM."
+        }
+
+        Write-Host "A preparar a correção dentro do Windows da VM..."
+        $scripts = Join-Path $windows "Setup\Scripts"
+        New-Item -ItemType Directory -Path $scripts -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $scripts "CorrigirSessao.ps1"), (Get-SessionRepairScript $Account), [Text.UTF8Encoding]::new($true))
+        [IO.File]::WriteAllText((Join-Path $scripts "CorrigirSessao.cmd"),
+            "@echo off`r`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Windows\Setup\Scripts\CorrigirSessao.ps1`r`n",
+            [Text.Encoding]::ASCII)
+        Remove-Item -LiteralPath (Join-Path $scripts "corrigir-sessao.txt") -Force -ErrorAction SilentlyContinue
+
+        New-Item -ItemType Directory -Path (Join-Path $policy "Machine\Scripts") -Force | Out-Null
+        [IO.File]::WriteAllText($startupIni, "[Startup]`r`n0CmdLine=C:\Windows\Setup\Scripts\CorrigirSessao.cmd`r`n0Parameters=`r`n", [Text.Encoding]::Unicode)
+        [IO.File]::WriteAllText($policyIni,
+            "[General]`r`ngPCMachineExtensionNames=[{42B5FAAE-6536-11D2-AE5A-0000F87571E3}{40B6664F-4972-11D1-A7CA-0000F87571E3}]`r`nVersion=9`r`n",
+            [Text.Encoding]::ASCII)
+        Invoke-OfflineRegistry (Join-Path $windows "System32\config\SOFTWARE") {
+            param($hive)
+            & reg.exe add "$hive\Microsoft\Windows\CurrentVersion\Policies\System" /v RunStartupScriptSync /t REG_DWORD /d 1 /f | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Não consegui escrever no registo da VM." }
+        }
+    } finally {
+        $mountedNow = $mounted
+        if ($letter) { Remove-AssignedDriveLetter ([string]$letter) }
+        if ($mountedNow) {
+            Dismount-VHD -Path $diskPath -ErrorAction SilentlyContinue
+            if ((Get-VHD -Path $diskPath -ErrorAction SilentlyContinue).Attached) {
+                "select vdisk file=`"$diskPath`"`r`ndetach vdisk`r`nexit" | diskpart.exe | Out-Null
+            }
+        }
+    }
+    if ((Get-VHD -Path $diskPath).Attached) { throw "O disco da VM continuou aberto neste Windows. Tenta outra vez." }
+
+    $vm = Get-VM -Name $VmName
+    $startGb = [int][math]::Ceiling([double]$vm.MemoryStartup / 1GB)
+    Stop-IfMemoryIsLow -StartupGb $startGb -AlreadyCreated $VmName
+
+    Write-Host "A ligar a VM '$VmName'. O Windows aplica a correção no arranque..."
+    Start-VM -Name $VmName
+
+    if (-not $AccountPassword) {
+        Write-Host "A VM '$VmName' foi ligada com a correção. Espera um minuto e abre a sessão avançada."
+        return
+    }
+
+    $secure = ConvertTo-SecureString $AccountPassword -AsPlainText -Force
+    $credential = New-Object System.Management.Automation.PSCredential($Account, $secure)
+    $deadline = (Get-Date).AddMinutes(6)
+    $report = $null
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 5
+        try {
+            $report = Invoke-Command -VMName $VmName -Credential $credential -ErrorAction Stop -ScriptBlock {
+                $out = ""
+                if (Test-Path "C:\Windows\Setup\Scripts\corrigir-sessao.txt") {
+                    $out = (Get-Content "C:\Windows\Setup\Scripts\corrigir-sessao.txt" -Raw).Trim()
+                }
+                $user = Get-LocalUser -Name $using:Account -ErrorAction SilentlyContinue
+                $groups = foreach ($sid in "S-1-5-32-544", "S-1-5-32-555") {
+                    $members = @(Get-LocalGroupMember -SID $sid -ErrorAction SilentlyContinue | ForEach-Object { $_.SID.Value })
+                    [bool]($user -and ($members -contains $user.SID.Value))
+                }
+                "ADMIN=$($groups[0]);REMOTO=$($groups[1]);$out"
+            }
+        } catch {
+            $report = $null
+        }
+        if ($report -and $report -like "ADMIN=True;REMOTO=True*") { break }
+    }
+    if (-not $report -or $report -notlike "ADMIN=True;REMOTO=True*") {
+        throw "Não consegui confirmar a correção dentro da VM. Último estado: $report"
+    }
+    Write-Host "Confirmado: a conta '$Account' já é administradora e pode usar a sessão avançada."
+}
+
+if ($FixSession) {
+    $passwordToCheck = if ($PSBoundParameters.ContainsKey("Password")) { $Password } else { $null }
+    Repair-AdvancedSession -VmName $Client -Account $UserName -AccountPassword $passwordToCheck
+    exit 0
+}
+
+if ($StartExisting) {
+    $existing = Get-VM -Name $Client -ErrorAction SilentlyContinue
+    if (-not $existing) { throw "A VM '$Client' já não existe no Hyper-V." }
+    if ([string]$existing.State -eq "Running") {
+        Write-Host "A VM '$Client' já está a correr."
+    } else {
+        $startGb = [int][math]::Ceiling([double]$existing.MemoryStartup / 1GB)
+        Write-Host "##PASSO:5"
+        Stop-IfMemoryIsLow -StartupGb $startGb -AlreadyCreated $Client
+        Write-Host "A iniciar a VM '$Client'..."
+        Start-VM -Name $Client
+    }
+    Start-Process vmconnect.exe -ArgumentList "localhost", $Client
+    Write-Host "A VM '$Client' está a arrancar."
+    exit 0
+}
+
 # Linhas "##..." são lidas pela aplicação para mostrar o progresso e saber o que limpar se for cancelado.
 Write-Host "##PASSO:1"
 
@@ -712,7 +854,7 @@ if (Get-VM -Name $Client -ErrorAction SilentlyContinue) {
 
 Stop-IfMemoryIsLow -StartupGb $StartMem
 
-$computerName = Get-SafeComputerName $Client
+$computerName = Get-SafeComputerName $Client $UserName
 $disk = Join-Path $Path "$Client.vhdx"
 if (-not $IsoPath) {
     $IsoPath = Join-Path $Path "Win10_22H2_pt-PT_x64.iso"
@@ -731,10 +873,9 @@ Write-Host "A criar o disco de '$Client'..."
 New-VHD -Path $disk -Dynamic -SizeBytes ($DiskSize * 1GB) | Out-Null
 Write-Host "##DISCO:$disk"
 $xml = Get-UnattendXml -ComputerName $computerName -Account $UserName -AccountPassword $Password
-$setupScript = Get-RemoteLogonScript -Account $UserName -Password $Password
 try {
     Write-Host "##PASSO:3"
-    Install-WindowsOffline -DiskPath $disk -Iso $IsoPath -VmGeneration $Generation -EditionName $ImageName -UnattendXml $xml -SetupScript $setupScript
+    Install-WindowsOffline -DiskPath $disk -Iso $IsoPath -VmGeneration $Generation -EditionName $ImageName -UnattendXml $xml
     Wait-VhdReleased $disk
 
     Write-Host "##PASSO:4"

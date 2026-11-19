@@ -21,6 +21,8 @@ Antes de descarregar ou copiar o que for, o script confirma que o Hyper-V respon
 
 A cópia do Windows demora vários minutos. A primeira sessão mostra "A preparar o Windows" e entra sozinha. O Windows não fica ativado. No fim, **Abrir ligação à VM** abre a consola da VM e, em **Detalhes**, podes copiar ou guardar o registo (a palavra-passe não aparece nele).
 
+Se a sessão avançada recusar a entrada («tem de ter o direito de iniciar sessão através dos Serviços de Ambiente Remoto»), carrega em **Corrigir Sessão Avançada**, no canto esquerdo do rodapé, quando a VM acabar de ser criada. A VM é desligada, a conta é posta nos Administradores e no Ambiente de Trabalho Remoto, e a VM volta a ligar-se (cerca de um a dois minutos). Se o nome da conta for igual ao da VM, o computador chama-se `NOME-PC`, porque com o mesmo nome o Windows não aceita a conta nos Administradores.
+
 Por omissão a VM chama-se `LABWIN10`, usa a edição Windows 10 Pro, a conta `Lab` com a palavra-passe `Lab12345`, 4 GB de memória (até 8 GB), 4 processadores, disco de 100 GB e o comutador **Default Switch**. Tudo isto se altera em **Opções avançadas** (memória, processadores, disco, comutador, geração e pasta dos discos).
 
 ## Pela consola

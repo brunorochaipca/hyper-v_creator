@@ -38,8 +38,11 @@ public sealed partial class MainWindow : Window
 
     private bool _ready;
     private bool _running;
+    private bool _fixing;
     private bool _showingResult;
     private bool _lastSucceeded;
+    private string? _pendingStartVm;
+    private VmOptions? _lastOptions;
     private bool _closeAfterRun;
     private bool _closeDialogOpen;
     private bool _hyperVOk = true;
@@ -87,7 +90,7 @@ public sealed partial class MainWindow : Window
 
     private async void AppWindow_Closing(AppWindow sender, AppWindowClosingEventArgs args)
     {
-        if (!_running)
+        if (!_running && !_fixing)
             return;
 
         args.Cancel = true;
@@ -97,6 +100,19 @@ public sealed partial class MainWindow : Window
         _closeDialogOpen = true;
         try
         {
+            // A correção não se interrompe: o disco da VM está aberto neste Windows enquanto é escrita.
+            if (_fixing)
+            {
+                await new ContentDialog
+                {
+                    XamlRoot = Root.XamlRoot,
+                    Title = "A correção ainda está a correr",
+                    Content = "Espera até terminar (demora cerca de um a dois minutos). Se saíres a meio, o disco da VM pode ficar aberto.",
+                    CloseButtonText = "Esperar"
+                }.ShowAsync();
+                return;
+            }
+
             var dialog = new ContentDialog
             {
                 XamlRoot = Root.XamlRoot,
@@ -256,23 +272,40 @@ public sealed partial class MainWindow : Window
 
     private void UpdateNameHint()
     {
-        var computer = ComputerName(NameBox.Text.Trim());
+        var computer = ComputerName(NameBox.Text.Trim(), UserBox.Text.Trim());
         NameHint.Text = $"Nome do computador dentro do Windows: {computer} (máximo 15 caracteres, só letras, números e hífenes).";
     }
 
-    /// <summary>Igual a Get-SafeComputerName do script.</summary>
-    private static string ComputerName(string name)
+    private static string KeepNameChars(string text) =>
+        new(text.Where(ch => ch is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9') or '-').ToArray());
+
+    /// <summary>
+    /// Igual a Get-SafeComputerName do script. Se a conta tiver o nome do computador o Windows recusa
+    /// pô-la nos Administradores, por isso o computador ganha o sufixo «-PC».
+    /// </summary>
+    private static string ComputerName(string name, string account)
     {
-        var clean = new string(name.Where(ch => ch is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9') or '-').ToArray());
+        var clean = KeepNameChars(name);
         if (clean.Length == 0)
             clean = "WIN10VM";
-        return clean.Length > 15 ? clean[..15] : clean;
+        if (clean.Length > 15)
+            clean = clean[..15];
+        if (string.Equals(clean, KeepNameChars(account), StringComparison.OrdinalIgnoreCase))
+        {
+            const string suffix = "-PC";
+            if (clean.Length + suffix.Length > 15)
+                clean = clean[..(15 - suffix.Length)];
+            clean += suffix;
+        }
+        return clean;
     }
 
     private void Field_TextChanged(object sender, TextChangedEventArgs e)
     {
-        if (_ready)
-            ClearError(UserError);
+        if (!_ready)
+            return;
+        ClearError(UserError);
+        UpdateNameHint();
     }
 
     private void PasswordBox_PasswordChanged(object sender, RoutedEventArgs e)
@@ -412,10 +445,14 @@ public sealed partial class MainWindow : Window
         if (_running)
             return;
 
-        // Depois de uma criação o formulário está escondido: o botão serve para voltar a ele.
+        // Depois de uma criação o formulário está escondido: o botão serve para voltar a ele
+        // ou, se a VM já ficou criada mas não arrancou, para a tentar arrancar outra vez.
         if (_showingResult)
         {
-            SetFormVisible(true);
+            if (_pendingStartVm is not null)
+                await StartPendingAsync();
+            else
+                SetFormVisible(true);
             return;
         }
 
@@ -423,6 +460,18 @@ public sealed partial class MainWindow : Window
         if (options is null)
             return;
 
+        // Avisa já no campo, em vez de falhar mais tarde: o Hyper-V não aceita duas VMs com o mesmo nome.
+        CreateButton.IsEnabled = false;
+        var existing = await VmRunner.ListVmNamesAsync();
+        CreateButton.IsEnabled = _hyperVOk;
+        if (existing.Contains(options.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            ShowError(NameError, $"Já existe uma VM chamada «{options.Name}» no Hyper-V. Escolhe outro nome ou apaga essa VM no Gestor do Hyper-V.");
+            NameBox.Focus(FocusState.Programmatic);
+            return;
+        }
+
+        _lastOptions = options;
         _lastVmName = options.Name;
         ShowSummary(options);
         SetFormVisible(false);
@@ -453,11 +502,103 @@ public sealed partial class MainWindow : Window
         else if (failure is not null)
             ShowFailure(failure);
         else if (result!.Notice is not null)
-            ShowNotice(result.Notice);
+            ShowNotice(result.Notice, result.CreatedVm);
         else if (result.ExitCode == 0)
             ShowSuccess(options);
         else
+        {
             ShowFailure(LastMeaningfulLine() ?? "A criação falhou.");
+            // A falha foi no arranque: a VM já está configurada, basta tentar arrancá-la.
+            if (result.CreatedVm is not null && _currentStep >= StepTitles.Length)
+                OfferResume(result.CreatedVm);
+        }
+
+        if (_closeAfterRun)
+            Close();
+    }
+
+    /// <summary>A VM já existe mas não arrancou: o botão principal passa a tentar só o arranque.</summary>
+    private void OfferResume(string vmName)
+    {
+        _pendingStartVm = vmName;
+        _lastVmName = vmName;
+        CreateButton.Content = "Tentar iniciar a VM";
+        BackButton.Visibility = Visibility.Visible;
+    }
+
+    private void BackButton_Click(object sender, RoutedEventArgs e)
+    {
+        // A VM criada fica no Hyper-V. Sugere outro nome para a próxima, para não chocar com ela.
+        var pending = _pendingStartVm;
+        SetFormVisible(true);
+        if (pending is not null && string.Equals(NameBox.Text.Trim(), pending, StringComparison.OrdinalIgnoreCase))
+            NameBox.Text = NextName(pending);
+    }
+
+    private async Task StartPendingAsync()
+    {
+        var name = _pendingStartVm!;
+        _lastVmName = name;
+        BackButton.Visibility = Visibility.Collapsed;
+        ResultBar.IsOpen = false;
+        _currentStep = _steps.Count;
+        for (var i = 0; i < _steps.Count; i++)
+        {
+            _steps[i].Detail = "";
+            _steps[i].State = i < _steps.Count - 1 ? StepState.Done : StepState.Running;
+        }
+        ProgressBar.IsIndeterminate = true;
+        ProgressBar.Visibility = Visibility.Visible;
+        ProgressHint.Text = "A iniciar a VM que já está criada…";
+        TitleText.Text = "A iniciar a VM…";
+        AppendLog($"A tentar iniciar a VM «{name}», que já estava criada.");
+        SetRunning(true);
+
+        _cts = new CancellationTokenSource();
+        var progress = new Progress<RunnerEvent>(OnRunnerEvent);
+        var runner = new VmRunner();
+        RunResult? result = null;
+        string? failure = null;
+        try
+        {
+            result = await Task.Run(() => runner.StartExistingAsync(name, progress, _cts.Token));
+        }
+        catch (Exception ex)
+        {
+            failure = ex.Message;
+        }
+
+        var cancelled = result?.Cancelled == true;
+        _cts.Dispose();
+        _cts = null;
+        SetRunning(false);
+
+        if (cancelled)
+        {
+            MarkCurrentStepFailed();
+            ShowResult(InfoBarSeverity.Informational, "Arranque cancelado", $"A VM «{name}» continua criada. Podes tentar iniciá-la outra vez.");
+            AppendLog("Cancelado.");
+            OfferResume(name);
+        }
+        else if (failure is not null)
+        {
+            ShowFailure(failure);
+            OfferResume(name);
+        }
+        else if (result!.Notice is not null)
+        {
+            ShowNotice(result.Notice, name);
+        }
+        else if (result.ExitCode == 0 && _lastOptions is not null)
+        {
+            _pendingStartVm = null;
+            ShowSuccess(_lastOptions);
+        }
+        else
+        {
+            ShowFailure(LastMeaningfulLine() ?? "Não consegui iniciar a VM.");
+            OfferResume(name);
+        }
 
         if (_closeAfterRun)
             Close();
@@ -468,7 +609,9 @@ public sealed partial class MainWindow : Window
         if (!_running || _cts is null)
             return;
         CancelButton.IsEnabled = false;
-        ProgressHint.Text = "A cancelar e a limpar o que foi criado…";
+        ProgressHint.Text = _pendingStartVm is null
+            ? "A cancelar e a limpar o que foi criado…"
+            : "A cancelar o arranque (a VM não é apagada)…";
         _cts.Cancel();
     }
 
@@ -486,8 +629,11 @@ public sealed partial class MainWindow : Window
         {
             ProgressCard.Visibility = Visibility.Collapsed;
             OpenVmButton.Visibility = Visibility.Collapsed;
+            FixSessionButton.Visibility = Visibility.Collapsed;
             CreateButton.Content = "Criar a VM";
             CreateButton.IsEnabled = _hyperVOk;
+            _pendingStartVm = null;
+            BackButton.Visibility = Visibility.Collapsed;
             if (_lastSucceeded && string.Equals(NameBox.Text.Trim(), _lastVmName, StringComparison.Ordinal))
                 NameBox.Text = NextName(_lastVmName);
             _lastSucceeded = false;
@@ -510,6 +656,7 @@ public sealed partial class MainWindow : Window
         CancelButton.IsEnabled = running;
         CreateButton.IsEnabled = !running && _hyperVOk;
         OpenVmButton.Visibility = Visibility.Collapsed;
+        FixSessionButton.Visibility = Visibility.Collapsed;
         if (!running)
             TitleText.Text = "Criar VM Windows 10";
     }
@@ -591,9 +738,91 @@ public sealed partial class MainWindow : Window
         ShowResult(InfoBarSeverity.Success, "VM criada",
             $"«{options.Name}» está a arrancar e entra sozinha com a conta «{options.UserName}». A primeira sessão mostra «A preparar o Windows». O Windows não fica ativado.");
         OpenVmButton.Visibility = Visibility.Visible;
+        FixSessionButton.Visibility = Visibility.Visible;
+        FixSessionButton.IsEnabled = true;
         CreateButton.Content = "Criar outra VM";
         _lastSucceeded = true;
         AppendLog("Concluído.");
+    }
+
+    /// <summary>
+    /// Se a sessão avançada recusar a entrada («tem de ter o direito de iniciar sessão através dos
+    /// Serviços de Ambiente Remoto»), mete a conta nos grupos certos com a VM desligada e volta a ligá-la.
+    /// </summary>
+    private async void FixSessionButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_running || _fixing || _lastOptions is null)
+            return;
+
+        var options = _lastOptions;
+        var name = _lastVmName;
+        var confirm = new ContentDialog
+        {
+            XamlRoot = Root.XamlRoot,
+            Title = "Corrigir a sessão avançada",
+            Content = $"A VM «{name}» vai ser desligada, a conta «{options.UserName}» passa a ser administradora e a VM volta a ligar-se. " +
+                      "Demora cerca de um a dois minutos. Guarda o que tiveres aberto na VM.",
+            PrimaryButtonText = "Corrigir",
+            CloseButtonText = "Cancelar",
+            DefaultButton = ContentDialogButton.Primary
+        };
+        if (await confirm.ShowAsync() != ContentDialogResult.Primary)
+            return;
+
+        _fixing = true;
+        FixSessionButton.IsEnabled = false;
+        CreateButton.IsEnabled = false;
+        OpenVmButton.IsEnabled = false;
+        TitleText.Text = "A corrigir a sessão avançada…";
+        ProgressBar.IsIndeterminate = true;
+        ProgressBar.Visibility = Visibility.Visible;
+        ProgressHint.Text = "A VM é desligada, corrigida e ligada outra vez. Não feches a aplicação.";
+        ShowResult(InfoBarSeverity.Informational, "A corrigir a sessão avançada…",
+            $"A conta «{options.UserName}» está a ser posta nos Administradores e no Ambiente de Trabalho Remoto.");
+        AppendLog($"A corrigir a sessão avançada da VM «{name}»…");
+
+        RunResult? result = null;
+        string? failure = null;
+        try
+        {
+            var progress = new Progress<RunnerEvent>(OnRunnerEvent);
+            result = await Task.Run(() => new VmRunner().FixSessionAsync(name, options.UserName, options.Password, progress));
+        }
+        catch (Exception ex)
+        {
+            failure = ex.Message;
+        }
+
+        _fixing = false;
+        ProgressBar.Visibility = Visibility.Collapsed;
+        ProgressHint.Text = "";
+        TitleText.Text = "Criar VM Windows 10";
+        FixSessionButton.IsEnabled = true;
+        OpenVmButton.IsEnabled = true;
+        CreateButton.IsEnabled = _hyperVOk;
+
+        if (failure is null && result!.ExitCode == 0)
+        {
+            ShowResult(InfoBarSeverity.Success, "Sessão avançada corrigida",
+                $"A conta «{options.UserName}» já pode entrar. Fecha a janela da VM, carrega em «Abrir ligação à VM» e entra com a palavra-passe da conta.");
+            AppendLog("Sessão avançada corrigida.");
+        }
+        else if (failure is null && result!.Notice is not null)
+        {
+            // A correção ficou escrita; só falta memória para ligar a VM.
+            ShowNotice(result.Notice, name);
+            FixSessionButton.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            ShowResult(InfoBarSeverity.Error, "Não consegui corrigir a sessão avançada",
+                failure ?? LastMeaningfulLine() ?? "A correção falhou.");
+            LogExpander.IsExpanded = true;
+            AppendLog("A correção falhou.");
+        }
+
+        if (_closeAfterRun)
+            Close();
     }
 
     /// <summary>LABWIN10 passa a LABWIN11, para a nova VM não chocar com a que acabou de ser criada.</summary>
@@ -625,10 +854,13 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>Problemas previstos pelo script: explicados em português, sem parecerem uma falha inesperada.</summary>
-    private void ShowNotice(RunNotice notice)
+    private void ShowNotice(RunNotice notice, string? createdVm)
     {
         CreateButton.Content = "Editar e tentar outra vez";
         MarkCurrentStepFailed();
+        // Faltou memória depois de a VM estar criada: não se recria, só se tenta arrancar.
+        if (notice.Kind == "MEMORIA" && createdVm is not null)
+            OfferResume(createdVm);
         var (severity, title) = notice.Kind switch
         {
             "ESPACO" => (InfoBarSeverity.Warning, "Não há espaço livre suficiente"),

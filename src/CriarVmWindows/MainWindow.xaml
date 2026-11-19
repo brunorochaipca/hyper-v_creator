@@ -252,12 +252,30 @@
         <Border Grid.Row="2" Padding="24,12"
                 Background="{ThemeResource LayerOnMicaBaseAltFillColorDefaultBrush}"
                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,1,0,0">
-            <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
-                <Button x:Name="OpenVmButton" Content="Abrir ligação à VM" Visibility="Collapsed" Click="OpenVmButton_Click" />
-                <Button x:Name="CancelButton" Content="Cancelar" Visibility="Collapsed" Click="CancelButton_Click" />
-                <Button x:Name="CreateButton" Content="Criar a VM" Style="{StaticResource AccentButtonStyle}"
-                        MinWidth="140" Click="CreateButton_Click" />
-            </StackPanel>
+            <Grid ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <!-- Só aparece depois de a VM ser criada: serve se a sessão avançada voltar a recusar a entrada. -->
+                <Button x:Name="FixSessionButton" Visibility="Collapsed" VerticalAlignment="Center"
+                        Click="FixSessionButton_Click"
+                        ToolTipService.ToolTip="Põe a conta da VM nos Administradores e no Ambiente de Trabalho Remoto. A VM é desligada e volta a ligar-se.">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon Glyph="&#xE90F;" FontSize="14" />
+                        <TextBlock Text="Corrigir Sessão Avançada" />
+                    </StackPanel>
+                </Button>
+
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                    <Button x:Name="OpenVmButton" Content="Abrir ligação à VM" Visibility="Collapsed" Click="OpenVmButton_Click" />
+                    <Button x:Name="BackButton" Content="Voltar ao formulário" Visibility="Collapsed" Click="BackButton_Click" />
+                    <Button x:Name="CancelButton" Content="Cancelar" Visibility="Collapsed" Click="CancelButton_Click" />
+                    <Button x:Name="CreateButton" Content="Criar a VM" Style="{StaticResource AccentButtonStyle}"
+                            MinWidth="140" Click="CreateButton_Click" />
+                </StackPanel>
+            </Grid>
         </Border>
     </Grid>
 </Window>
